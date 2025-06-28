@@ -131,8 +131,35 @@ jobs:
             --context=${{ inputs.context || env.CONTEXT }}
             --destination=registry.digitalocean.com/lonius/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
             --dockerfile=${{ inputs.dockerfile || env.DOCKERFILE }}
-      - name: Remove old images from Container Registry
-        uses: ripplr-io/docr-image-remove@v1
-        with:
-          image_repository: ${{ env.IMAGE_NAME }}  # Required
-          buffer_size: 3 # Optional, default is 10
+      # Remove old image1 tags and images, keeping the latest 3
+      - name: Clean up old image1 tags and images
+        env:
+          REPOSITORY: ${{ env.IMAGE_NAME }}
+          REGISTRY: registry.digitalocean.com/lonius
+          MIN_TO_KEEP: 3
+        run: |
+          sudo apt-get update && sudo apt-get install -y jq
+          # List tags for image1, sort by updated_at (newest first), and get the latest 3
+          tags=$(doctl registry repository list-tags $REPOSITORY --output json | \
+                 jq -r '.[] | .tag + "," + .updated_at' | \
+                 sort -t, -k2 -r | \
+                 head -n $MIN_TO_KEEP | \
+                 cut -d, -f1)
+          # Get all tags for image1
+          all_tags=$(doctl registry repository list-tags $REPOSITORY --output json | jq -r '.[] | .tag')
+          # Identify tags to delete
+          tags_to_delete=""
+          for tag in $all_tags; do
+            if ! echo "$tags" | grep -Fx "$tag" > /dev/null; then
+              tags_to_delete="$tags_to_delete $tag"
+            fi
+          done
+          # Delete old tags if any
+          if [ -n "$tags_to_delete" ]; then
+            echo "Deleting tags: $tags_to_delete"
+            doctl registry repository delete-tag $REPOSITORY $tags_to_delete --force
+          else
+            echo "No tags to delete."
+          fi
+          # Run garbage collection to delete unreferenced layers
+          doctl registry garbage-collection start --include-untagged-manifests --force
