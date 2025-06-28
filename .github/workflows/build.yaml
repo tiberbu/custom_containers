@@ -131,3 +131,8 @@ jobs:
             --context=${{ inputs.context || env.CONTEXT }}
             --destination=registry.digitalocean.com/lonius/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
             --dockerfile=${{ inputs.dockerfile || env.DOCKERFILE }}
+      - name: Remove old images from Container Registry
+        uses: ripplr-io/docr-image-remove@v1
+        with:
+          image_repository: ${{ env.IMAGE_NAME }}  # Required
+          buffer_size: 3 # Optional, default is 10
