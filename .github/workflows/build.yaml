@@ -136,7 +136,7 @@ jobs:
         env:
           REPOSITORY: ${{ env.IMAGE_NAME }}
           REGISTRY: registry.digitalocean.com/lonius
-          MIN_TO_KEEP: 3
+          MIN_TO_KEEP: 6
         run: |
           sudo apt-get update && sudo apt-get install -y jq
           # List tags for image1, sort by updated_at (newest first), and get the latest 3
