@@ -28,14 +28,17 @@ on:
         description: base64 encoded string of apps.json
         type: string
       context:
-        description: kaniko context
+        description: docker build context (ignored here; we use local checkout of frappe_docker)
         type: string
+        required: false
       dockerfile:
-        description: dockerfile path from context
+        description: dockerfile path (ignored here; we use frappe_docker/images/custom/Containerfile)
         type: string
+        required: false
       registry-user:
         description: user name
         required: false
+        type: string
 
 env:
   TOKEN: ${{ secrets.TOKEN }}
@@ -48,7 +51,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout
+      # Your repo (holds ci/script.py, build.env, etc.)
+      - name: Checkout (workflow repo)
         uses: actions/checkout@v4
 
       - name: Clean Git Cache
@@ -59,14 +63,14 @@ jobs:
           TOKEN: ${{ secrets.TOKEN }}
         run: python ci/script.py
 
-      # Load repo defaults (fallbacks). Inputs will still win in Kaniko args.
+      # Load defaults/fallbacks from your repo
       - name: Source Build Env
         run: |
           [ -f ./ci/build.env ] && cat ./ci/build.env >> $GITHUB_ENV
           [ -f ./ci/version.txt ] && echo "VERSION=$(cat ./ci/version.txt)" >> $GITHUB_ENV
           [ -f ./ci/apps.json ] && echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps.json)" >> $GITHUB_ENV
 
-      # --- ECR auth & push ---
+      # --- AWS & ECR auth/push ---
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -94,19 +98,15 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-      - name: Use empty Docker config for Kaniko pull
-        run: |
-          mkdir -p /tmp/empty-docker-config
-          echo '{}' > /tmp/empty-docker-config/config.json
-
-      - name: Checkout frappe_docker
+      # Pull the Docker build context we actually want to build (frappe_docker)
+      - name: Checkout frappe_docker (build context)
         uses: actions/checkout@v4
         with:
           repository: frappe/frappe_docker
           ref: main
           path: frappe_docker
-      
-      # Setup Buildx using the container driver (supports cache + push)
+
+      # Buildx with container driver (no GitHub blob cache; just push to ECR)
       - name: Set up Docker Buildx (container driver)
         id: buildx
         uses: docker/setup-buildx-action@v3
@@ -114,14 +114,13 @@ jobs:
           driver: docker-container
           driver-opts: |
             image=moby/buildkit:buildx-stable-1
-      
-      # (Optional) Verify Buildx configuration
-      - name: Verify Buildx builder
+
+      - name: Verify Buildx
         run: |
           docker buildx ls
           docker buildx inspect ${{ steps.buildx.outputs.name }}
-      
-      # Build and push Docker image to ECR
+
+      # Build and push ONLY to ECR (no cache export to GitHub storage)
       - name: Build and push Docker image to ECR
         uses: docker/build-push-action@v6
         with:
@@ -130,20 +129,11 @@ jobs:
           file: ./frappe_docker/images/custom/Containerfile
           push: true
           provenance: false
-      
           build-args: |
             FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
             FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
             PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
             NODE_VERSION=${{ inputs.nodejs-version || env.NODEJS_VERSION }}
             APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
-      
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
-      
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
-
-      
-            
