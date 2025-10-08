@@ -97,6 +97,7 @@ jobs:
       - name: Build and push Docker image with Kaniko
         uses: int128/kaniko-action@v1
         with:
+          executor: us-docker.pkg.dev/kaniko-project/kaniko/executor:v1.24.0
           push: true
           cache: false
           kaniko-args: |
