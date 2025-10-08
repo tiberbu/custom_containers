@@ -98,22 +98,52 @@ jobs:
         run: |
           mkdir -p /tmp/empty-docker-config
           echo '{}' > /tmp/empty-docker-config/config.json
-      
 
-      - name: Build & push to ECR (Buildx)
+      - name: Checkout frappe_docker
+        uses: actions/checkout@v4
+        with:
+          repository: frappe/frappe_docker
+          ref: main
+          path: frappe_docker
+      
+      # Setup Buildx using the container driver (supports cache + push)
+      - name: Set up Docker Buildx (container driver)
+        id: buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          driver: docker-container
+          driver-opts: |
+            image=moby/buildkit:buildx-stable-1
+      
+      # (Optional) Verify Buildx configuration
+      - name: Verify Buildx builder
+        run: |
+          docker buildx ls
+          docker buildx inspect ${{ steps.buildx.outputs.name }}
+      
+      # Build and push Docker image to ECR
+      - name: Build and push Docker image to ECR
         uses: docker/build-push-action@v6
         with:
-          context: ${{ inputs.context || env.CONTEXT }}
-          file: ${{ inputs.dockerfile || env.DOCKERFILE }}
+          builder: ${{ steps.buildx.outputs.name }}
+          context: ./frappe_docker
+          file: ./frappe_docker/images/custom/Containerfile
           push: true
           provenance: false
+      
           build-args: |
             FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
             FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
             PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
             NODE_VERSION=${{ inputs.nodejs-version || env.NODEJS_VERSION }}
             APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
+      
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+      
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+
       
             
