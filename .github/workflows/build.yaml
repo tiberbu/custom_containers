@@ -94,8 +94,15 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
+      - name: Use empty Docker config for Kaniko pull
+        run: |
+          mkdir -p /tmp/empty-docker-config
+          echo '{}' > /tmp/empty-docker-config/config.json
+      
       - name: Build and push Docker image with Kaniko
         uses: int128/kaniko-action@v1
+        env:
+          DOCKER_CONFIG: /tmp/empty-docker-config
         with:
           executor: us-docker.pkg.dev/kaniko-project/kaniko/executor:v1.24.0
           push: true
