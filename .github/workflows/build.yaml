@@ -106,7 +106,7 @@ jobs:
           context: ${{ inputs.context || env.CONTEXT }}
           file: ${{ inputs.dockerfile || env.DOCKERFILE }}
           push: true
-          provenance: false                   
+          provenance: false
           build-args: |
             FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
             FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
@@ -115,6 +115,5 @@ jobs:
             APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
       
+            
