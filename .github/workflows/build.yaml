@@ -99,21 +99,22 @@ jobs:
           mkdir -p /tmp/empty-docker-config
           echo '{}' > /tmp/empty-docker-config/config.json
       
-      - name: Build and push Docker image with Kaniko
-        uses: int128/kaniko-action@v1
-        env:
-          DOCKER_CONFIG: /tmp/empty-docker-config
+
+      - name: Build & push to ECR (Buildx)
+        uses: docker/build-push-action@v6
         with:
-          executor: us-docker.pkg.dev/kaniko-project/kaniko/executor:v1.24.0
+          context: ${{ inputs.context || env.CONTEXT }}
+          file: ${{ inputs.dockerfile || env.DOCKERFILE }}
           push: true
-          cache: false
-          kaniko-args: |
-            --build-arg=FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
-            --build-arg=FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
-            --build-arg=PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
-            --build-arg=NODE_VERSION=${{ inputs.nodejs-version || env.NODEJS_VERSION }}
-            --build-arg=APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
-            --context=${{ inputs.context || env.CONTEXT }}
-            --destination=${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
-            --dockerfile=${{ inputs.dockerfile || env.DOCKERFILE }}
+          provenance: false                   
+          build-args: |
+            FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
+            FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
+            PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
+            NODE_VERSION=${{ inputs.nodejs-version || env.NODEJS_VERSION }}
+            APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
       
