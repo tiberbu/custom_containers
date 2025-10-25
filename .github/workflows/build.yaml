@@ -134,3 +134,5 @@ jobs:
             APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+        env:
+          BUILDKIT_PROGRESS: plain
