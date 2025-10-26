@@ -9,72 +9,77 @@ on:
     inputs:
       image:
         description: Image name
+        required: true
         type: string
       version:
         description: Image version tag
+        required: true
         type: string
       frappe-repo:
         description: Frappe repo
+        required: false
         type: string
       frappe-version:
         description: Frappe branch
+        required: false
         type: string
       py-version:
         description: Python version
+        required: false
         type: string
       nodejs-version:
         description: NodeJS version
+        required: false
         type: string
       apps-json-base64:
         description: base64 encoded string of apps.json
+        required: false
         type: string
       context:
-        description: docker build context (ignored; we use local checkout of frappe_docker)
+        description: build context (ignored; we use local checkout of frappe_docker)
         required: false
         type: string
       dockerfile:
         description: dockerfile path (ignored; we use frappe_docker/images/custom/Containerfile)
         required: false
         type: string
-      registry-user:
-        description: user name
-        required: false
-        type: string
 
 env:
-  TOKEN: ${{ secrets.TOKEN }}
-  IMAGE_NAME: ${{ inputs.image }}
-  IMAGE_VERSION: ${{ inputs.version }}
   AWS_REGION: me-central-1
   ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.me-central-1.amazonaws.com
+  IMAGE_NAME: ${{ inputs.image }}
+  IMAGE_VERSION: ${{ inputs.version }}
 
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 60
+    timeout-minutes: 90
 
     steps:
-      # 1️⃣ Checkout this repo (workflow + ci scripts)
       - name: Checkout (workflow repo)
         uses: actions/checkout@v4
 
       - name: Clean Git Cache
         run: git clean -ffdx && git reset --hard
 
-      # 2️⃣ Update JSON config
-      - name: Run Python Script to Update JSON
+      - name: Run Python Script to Update JSON (if present)
         env:
           TOKEN: ${{ secrets.TOKEN }}
-        run: python ci/script.py
+        run: |
+          if [ -f ci/script.py ]; then
+            python ci/script.py
+          else
+            echo "ci/script.py not found; skipping"
+          fi
 
-      # 3️⃣ Source local env (optional)
-      - name: Source Build Env
+      - name: Source Build Env (optional)
         run: |
           [ -f ./ci/build.env ] && cat ./ci/build.env >> $GITHUB_ENV
           [ -f ./ci/version.txt ] && echo "VERSION=$(cat ./ci/version.txt)" >> $GITHUB_ENV
-          [ -f ./ci/apps.json ] && echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps.json)" >> $GITHUB_ENV
+          if [ -f ./ci/apps.json ]; then
+            echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps.json)" >> $GITHUB_ENV
+          fi
 
-      # 4️⃣ Configure AWS credentials (verified)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -82,7 +87,6 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
-      # 5️⃣ Ensure ECR repo exists
       - name: Ensure ECR repository exists
         run: |
           set -e
@@ -97,13 +101,11 @@ jobs:
             echo "ECR repository already exists: $IMAGE_NAME"
           fi
 
-      # 6️⃣ Login to ECR
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-      # 7️⃣ Pull frappe_docker as build context
       - name: Checkout frappe_docker (build context)
         uses: actions/checkout@v4
         with:
@@ -111,39 +113,54 @@ jobs:
           ref: main
           path: frappe_docker
 
-      # 8️⃣ Set up Buildx (built-in Docker driver — verified)
-      - name: Set up Docker Buildx
+      - name: Patch upstream Containerfile to install build deps & decode apps.json
+        run: |
+          CONTAINERFILE=frappe_docker/images/custom/Containerfile
+          if [ ! -f "$CONTAINERFILE" ]; then
+            echo "ERROR: $CONTAINERFILE not found"; ls -la frappe_docker || exit 1
+          fi
+          echo "Backing up original Containerfile to ${CONTAINERFILE}.bak"
+          cp "$CONTAINERFILE" "${CONTAINERFILE}.bak"
+          echo "Inserting dependency install & apps.json decode before bench init"
+          # Insert ARG APPS_JSON_BASE64 and a RUN that installs system deps, pip, frappe-bench and decodes apps json
+          # We insert the block immediately BEFORE the line that starts with "RUN export APP_INSTALL_ARGS"
+          sed -i '/^RUN export APP_INSTALL_ARGS/i ARG APPS_JSON_BASE64\nRUN apt-get update && apt-get install -y --no-install-recommends git curl python3-pip python3-dev libffi-dev libssl-dev gcc g++ make wkhtmltopdf && pip install -U pip setuptools wheel frappe-bench && if [ -n "${APPS_JSON_BASE64}" ]; then echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; fi && rm -rf /var/lib/apt/lists/*' "$CONTAINERFILE"
+          echo "Patch complete. Showing context around insertion:"
+          sed -n '1,160p' "$CONTAINERFILE" | sed -n '100,160p'
+
+      - name: Set up Docker Buildx (default driver - uses runner Buildx/BuildKit)
         id: buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Verify Buildx
         run: docker buildx ls
 
-      # 9️⃣ Build & Push (with safe defaults + verbose output)
       - name: Build and push Docker image to ECR
         uses: docker/build-push-action@v6
+        env:
+          DOCKER_BUILDKIT: 1
+          BUILDKIT_PROGRESS: plain
         with:
           context: ./frappe_docker
           file: ./frappe_docker/images/custom/Containerfile
           push: true
           provenance: false
           sbom: false
+          build-args: |
+            FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_PATH || 'https://github.com/frappe/frappe' }}
+            FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_BRANCH || 'version-15' }}
+            PYTHON_VERSION=${{ inputs.py-version || env.PYTHON_VERSION || '3.11' }}
+            NODE_VERSION=${{ inputs.nodejs-version || env.NODE_VERSION || '18' }}
+            APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 || '' }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
-          build-args: |
-            FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
-            FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
-            PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
-            NODE_VERSION=${{ inputs.nodejs-version || env.NODEJS_VERSION }}
-            APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
-        env:
-          DOCKER_BUILDKIT: 1
-          BUILDKIT_PROGRESS: plain
 
-      # 🔟 Optional: Print debug info if build fails
-      - name: Print Docker logs (on failure)
+      - name: Debug info (only on failure)
         if: failure()
         run: |
-          echo "==== Buildx Debug ===="
-          docker buildx du
-          docker system df -v
+          echo "=== buildx ls ==="
+          docker buildx ls || true
+          echo "=== docker system df ==="
+          docker system df || true
+          echo "=== tail buildkit logs (if any) ==="
+          docker buildx du --builder ${{ steps.buildx.outputs.name }} || true
