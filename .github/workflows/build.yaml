@@ -1,4 +1,5 @@
 name: Build Image
+
 on:
   push:
     branches:
@@ -29,12 +30,12 @@ on:
         type: string
       context:
         description: docker build context (ignored; we use local checkout of frappe_docker)
-        type: string
         required: false
+        type: string
       dockerfile:
         description: dockerfile path (ignored; we use frappe_docker/images/custom/Containerfile)
-        type: string
         required: false
+        type: string
       registry-user:
         description: user name
         required: false
@@ -50,28 +51,30 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 60
+
     steps:
-      # Your workflow repo (holds ci/script.py, env files, etc.)
+      # 1️⃣ Checkout this repo (workflow + ci scripts)
       - name: Checkout (workflow repo)
         uses: actions/checkout@v4
 
       - name: Clean Git Cache
         run: git clean -ffdx && git reset --hard
 
+      # 2️⃣ Update JSON config
       - name: Run Python Script to Update JSON
         env:
           TOKEN: ${{ secrets.TOKEN }}
         run: python ci/script.py
 
-      # Load defaults/fallbacks from your repo
+      # 3️⃣ Source local env (optional)
       - name: Source Build Env
         run: |
           [ -f ./ci/build.env ] && cat ./ci/build.env >> $GITHUB_ENV
           [ -f ./ci/version.txt ] && echo "VERSION=$(cat ./ci/version.txt)" >> $GITHUB_ENV
           [ -f ./ci/apps.json ] && echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps.json)" >> $GITHUB_ENV
 
-      # --- AWS & ECR auth/push ---
-
+      # 4️⃣ Configure AWS credentials (verified)
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
         with:
@@ -79,6 +82,7 @@ jobs:
           aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
           aws-region: ${{ env.AWS_REGION }}
 
+      # 5️⃣ Ensure ECR repo exists
       - name: Ensure ECR repository exists
         run: |
           set -e
@@ -93,12 +97,13 @@ jobs:
             echo "ECR repository already exists: $IMAGE_NAME"
           fi
 
+      # 6️⃣ Login to ECR
       - name: Login to Amazon ECR
         run: |
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-      # Pull the Docker build context we actually want to build (frappe_docker)
+      # 7️⃣ Pull frappe_docker as build context
       - name: Checkout frappe_docker (build context)
         uses: actions/checkout@v4
         with:
@@ -106,33 +111,39 @@ jobs:
           ref: main
           path: frappe_docker
 
-      # Set up Buildx using the default docker driver (no extra images pulled)
-      - name: Set up Docker Buildx (default driver)
+      # 8️⃣ Set up Buildx (built-in Docker driver — verified)
+      - name: Set up Docker Buildx
         id: buildx
         uses: docker/setup-buildx-action@v3
-        # No 'with:' block here → uses the built-in docker driver on the runner
 
       - name: Verify Buildx
-        run: |
-          docker buildx ls
-          docker buildx inspect ${{ steps.buildx.outputs.name }}
+        run: docker buildx ls
 
-      # Build and push ONLY to ECR (no cache export to GitHub storage)
+      # 9️⃣ Build & Push (with safe defaults + verbose output)
       - name: Build and push Docker image to ECR
         uses: docker/build-push-action@v6
         with:
-          # Using the default builder (docker driver)
           context: ./frappe_docker
           file: ./frappe_docker/images/custom/Containerfile
           push: true
           provenance: false
+          sbom: false
+          tags: |
+            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
           build-args: |
             FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
             FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
             PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
             NODE_VERSION=${{ inputs.nodejs-version || env.NODEJS_VERSION }}
             APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
-          tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
         env:
+          DOCKER_BUILDKIT: 1
           BUILDKIT_PROGRESS: plain
+
+      # 🔟 Optional: Print debug info if build fails
+      - name: Print Docker logs (on failure)
+        if: failure()
+        run: |
+          echo "==== Buildx Debug ===="
+          docker buildx du
+          docker system df -v
