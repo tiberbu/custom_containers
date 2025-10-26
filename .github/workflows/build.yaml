@@ -1,9 +1,9 @@
 name: Build Image
-
 on:
   push:
     branches:
       - master
+  repository_dispatch:
   workflow_dispatch:
     inputs:
       image:
@@ -13,7 +13,7 @@ on:
         description: Image version tag
         type: string
       frappe-repo:
-        description: Frappe repo URL
+        description: Frappe repo
         type: string
       frappe-version:
         description: Frappe branch
@@ -27,10 +27,15 @@ on:
       apps-json-base64:
         description: base64 encoded string of apps.json
         type: string
-      registry-user:
-        description: Registry user name
-        required: false
+      context:
+        description: kaniko context
         type: string
+      dockerfile:
+        description: dockerfile path from context
+        type: string
+      registry-user:
+        description: user name
+        required: false
 
 env:
   TOKEN: ${{ secrets.TOKEN }}
@@ -42,32 +47,26 @@ env:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 90
-
     steps:
-      - name: Checkout workflow repo
+      - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Clean Git cache
+      - name: Clean Git Cache
         run: git clean -ffdx && git reset --hard
 
-      - name: Run Python script to update JSON (if present)
+      - name: Run Python Script to Update JSON
         env:
           TOKEN: ${{ secrets.TOKEN }}
-        run: |
-          if [ -f ci/script.py ]; then
-            python ci/script.py
-          else
-            echo "ci/script.py not found; skipping"
-          fi
+        run: python ci/script.py
 
-      - name: Load build env defaults
+      # Load repo defaults (fallbacks). Inputs will still win in Kaniko args.
+      - name: Source Build Env
         run: |
           [ -f ./ci/build.env ] && cat ./ci/build.env >> $GITHUB_ENV
           [ -f ./ci/version.txt ] && echo "VERSION=$(cat ./ci/version.txt)" >> $GITHUB_ENV
-          if [ -f ./ci/apps.json ]; then
-            echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps.json)" >> $GITHUB_ENV
-          fi
+          [ -f ./ci/apps.json ] && echo "APPS_JSON_BASE64=$(base64 -w 0 ./ci/apps.json)" >> $GITHUB_ENV
+
+      # --- ECR auth & push ---
 
       - name: Configure AWS credentials
         uses: aws-actions/configure-aws-credentials@v4
@@ -85,9 +84,9 @@ jobs:
               --region "$AWS_REGION" \
               --image-scanning-configuration scanOnPush=true \
               --encryption-configuration encryptionType=AES256
-            echo "✅ Created ECR repository: $IMAGE_NAME"
+            echo "Created ECR repository: $IMAGE_NAME"
           else
-            echo "ℹ️ ECR repository already exists: $IMAGE_NAME"
+            echo "ECR repository already exists: $IMAGE_NAME"
           fi
 
       - name: Login to Amazon ECR
@@ -95,109 +94,18 @@ jobs:
           aws ecr get-login-password --region "$AWS_REGION" \
             | docker login --username AWS --password-stdin "$ECR_REGISTRY"
 
-      - name: Checkout frappe_docker (build context)
-        uses: actions/checkout@v4
+      - name: Build and push Docker image with Kaniko
+        uses: int128/kaniko-action@v1
         with:
-          repository: frappe/frappe_docker
-          ref: main
-          path: frappe_docker
-
-      - name: Patch upstream Containerfile (safe, no heredocs)
-        run: |
-          set -euo pipefail
-          CONTAINERFILE=frappe_docker/images/custom/Containerfile
-          if [ ! -f "$CONTAINERFILE" ]; then
-            echo "ERROR: $CONTAINERFILE not found"
-            ls -la frappe_docker || true
-            exit 1
-          fi
-          echo "Backing up original Containerfile to ${CONTAINERFILE}.bak"
-          cp "$CONTAINERFILE" "${CONTAINERFILE}.bak"
-
-          # create snippet file line-by-line (avoids heredoc/YAML parsing issues)
-          SNIP=/tmp/frappe_snippet.txt
-          : > "$SNIP"
-          printf '%s\n' 'ARG APPS_JSON_BASE64' >> "$SNIP"
-          printf '%s\n' '' >> "$SNIP"
-          printf '%s\n' '# Install dependencies in a distro-aware way, prepare pip and decode apps.json if present' >> "$SNIP"
-          printf '%s\n' 'RUN set -eux; \' >> "$SNIP"
-          printf '%s\n' '    if command -v apt-get >/dev/null 2>&1; then \' >> "$SNIP"
-          printf '%s\n' '      export DEBIAN_FRONTEND=noninteractive; \' >> "$SNIP"
-          printf '%s\n' '      apt-get update; \' >> "$SNIP"
-          printf '%s\n' '      apt-get install -y --no-install-recommends git curl python3 python3-pip python3-dev libffi-dev libssl-dev gcc g++ make ca-certificates; \' >> "$SNIP"
-          printf '%s\n' '      if apt-cache show wkhtmltopdf >/dev/null 2>&1; then apt-get install -y wkhtmltopdf || true; fi; \' >> "$SNIP"
-          printf '%s\n' '      rm -rf /var/lib/apt/lists/*; \' >> "$SNIP"
-          printf '%s\n' '    elif command -v apk >/dev/null 2>&1; then \' >> "$SNIP"
-          printf '%s\n' '      apk add --no-cache git curl python3 py3-pip build-base libffi-dev openssl-dev; \' >> "$SNIP"
-          printf '%s\n' '    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then \' >> "$SNIP"
-          printf '%s\n' '      if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi; \' >> "$SNIP"
-          printf '%s\n' '      $PM -y install git curl python3 python3-pip python3-devel libffi-devel openssl-devel gcc gcc-c++ make; \' >> "$SNIP"
-          printf '%s\n' '      $PM -y install wkhtmltopdf || true; \' >> "$SNIP"
-          printf '%s\n' '    else \' >> "$SNIP"
-          printf '%s\n' '      echo "No supported package manager found (apt-get/apk/dnf/yum)." >&2; false; \' >> "$SNIP"
-          printf '%s\n' '    fi; \' >> "$SNIP"
-          printf '%s\n' '    if command -v pip3 >/dev/null 2>&1; then PIP=pip3; else PIP=pip; fi; \' >> "$SNIP"
-          printf '%s\n' '    $PIP install -U pip setuptools wheel frappe-bench || true; \' >> "$SNIP"
-          printf '%s\n' '    if [ -n "${APPS_JSON_BASE64:-}" ]; then mkdir -p /opt/frappe && echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; fi' >> "$SNIP"
-
-          # now insert snippet file before the marker line
-          MARKER='^RUN export APP_INSTALL_ARGS'
-          awk -v snipfile="$SNIP" -v marker="$MARKER" '
-            BEGIN {
-              # read snippet file into variable
-              s="";
-              while ((getline line < snipfile) > 0) { s = s line "\n" }
-              close(snipfile)
-              inserted = 0
-            }
-            {
-              if (!inserted && $0 ~ marker) {
-                printf("%s", s)
-                inserted = 1
-              }
-              print $0
-            }
-            END {
-              if (!inserted) {
-                print "ERROR: marker not found" > "/dev/stderr"
-                exit 2
-              }
-            }
-          ' "$CONTAINERFILE" > "${CONTAINERFILE}.new"
-          mv "${CONTAINERFILE}.new" "$CONTAINERFILE"
-          echo "Patch applied successfully. Showing insertion context:"
-          sed -n '1,240p' "$CONTAINERFILE" | sed -n '80,220p' || true
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@v3
-
-      - name: Verify Buildx
-        run: docker buildx ls
-
-      - name: Build and push Docker image
-        uses: docker/build-push-action@v6
-        env:
-          DOCKER_BUILDKIT: 1
-          BUILDKIT_PROGRESS: plain
-        with:
-          context: ./frappe_docker
-          file: ./frappe_docker/images/custom/Containerfile
           push: true
-          provenance: false
-          build-args: |
-            FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO || 'https://github.com/frappe/frappe' }}
-            FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION || 'version-15' }}
-            PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION || '3.11' }}
-            NODE_VERSION=${{ inputs.nodejs-version || env.NODE_VERSION || '18' }}
-            APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 || '' }}
-          tags: |
-            ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
-
-      - name: Debug info (only on failure)
-        if: failure()
-        run: |
-          echo "=== buildx ls ==="
-          docker buildx ls || true
-          echo "=== docker system df ==="
-          docker system df || true
-          docker info || true
+          cache: false
+          kaniko-args: |
+            --build-arg=FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
+            --build-arg=FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
+            --build-arg=PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
+            --build-arg=NODE_VERSION=${{ inputs.nodejs-version || env.NODEJS_VERSION }}
+            --build-arg=APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
+            --context=${{ inputs.context || env.CONTEXT }}
+            --destination=${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
+            --dockerfile=${{ inputs.dockerfile || env.DOCKERFILE }}
+      
