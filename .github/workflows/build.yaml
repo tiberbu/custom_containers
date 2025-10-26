@@ -4,51 +4,40 @@ on:
   push:
     branches:
       - master
-  repository_dispatch:
   workflow_dispatch:
     inputs:
       image:
         description: Image name
-        required: true
         type: string
       version:
         description: Image version tag
-        required: true
         type: string
       frappe-repo:
-        description: Frappe repo
-        required: false
+        description: Frappe repo URL
         type: string
       frappe-version:
         description: Frappe branch
-        required: false
         type: string
       py-version:
         description: Python version
-        required: false
         type: string
       nodejs-version:
         description: NodeJS version
-        required: false
         type: string
       apps-json-base64:
         description: base64 encoded string of apps.json
-        required: false
         type: string
-      context:
-        description: build context (ignored; we use local checkout of frappe_docker)
-        required: false
-        type: string
-      dockerfile:
-        description: dockerfile path (ignored; we use frappe_docker/images/custom/Containerfile)
+      registry-user:
+        description: Registry user name
         required: false
         type: string
 
 env:
-  AWS_REGION: me-central-1
-  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.me-central-1.amazonaws.com
+  TOKEN: ${{ secrets.TOKEN }}
   IMAGE_NAME: ${{ inputs.image }}
   IMAGE_VERSION: ${{ inputs.version }}
+  AWS_REGION: me-central-1
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.me-central-1.amazonaws.com
 
 jobs:
   build:
@@ -56,13 +45,13 @@ jobs:
     timeout-minutes: 90
 
     steps:
-      - name: Checkout (workflow repo)
+      - name: Checkout workflow repo
         uses: actions/checkout@v4
 
-      - name: Clean Git Cache
+      - name: Clean Git cache
         run: git clean -ffdx && git reset --hard
 
-      - name: Run Python Script to Update JSON (if present)
+      - name: Run Python script to update JSON
         env:
           TOKEN: ${{ secrets.TOKEN }}
         run: |
@@ -72,7 +61,7 @@ jobs:
             echo "ci/script.py not found; skipping"
           fi
 
-      - name: Source Build Env (optional)
+      - name: Load build env defaults
         run: |
           [ -f ./ci/build.env ] && cat ./ci/build.env >> $GITHUB_ENV
           [ -f ./ci/version.txt ] && echo "VERSION=$(cat ./ci/version.txt)" >> $GITHUB_ENV
@@ -96,9 +85,9 @@ jobs:
               --region "$AWS_REGION" \
               --image-scanning-configuration scanOnPush=true \
               --encryption-configuration encryptionType=AES256
-            echo "Created ECR repository: $IMAGE_NAME"
+            echo "✅ Created ECR repository: $IMAGE_NAME"
           else
-            echo "ECR repository already exists: $IMAGE_NAME"
+            echo "ℹ️ ECR repository already exists: $IMAGE_NAME"
           fi
 
       - name: Login to Amazon ECR
@@ -113,52 +102,45 @@ jobs:
           ref: main
           path: frappe_docker
 
-      - name: Patch upstream Containerfile with robust installer & decode apps.json
+      - name: Patch upstream Containerfile
         run: |
+          set -euo pipefail
           CONTAINERFILE=frappe_docker/images/custom/Containerfile
           if [ ! -f "$CONTAINERFILE" ]; then
-            echo "ERROR: $CONTAINERFILE not found"; ls -la frappe_docker || exit 1
+            echo "ERROR: $CONTAINERFILE not found"
+            ls -la frappe_docker || true
+            exit 1
           fi
           echo "Backing up original Containerfile to ${CONTAINERFILE}.bak"
           cp "$CONTAINERFILE" "${CONTAINERFILE}.bak"
-      
-          echo "Creating a robust install snippet to insert before bench init..."
-      
+
           read -r -d '' INSTALL_SNIPPET <<'SNIP'
-      ARG APPS_JSON_BASE64
-      
-      # Install build-time dependencies depending on package manager / distro.
-      RUN set -eux; \
-          if command -v apt-get >/dev/null 2>&1; then \
-            export DEBIAN_FRONTEND=noninteractive; \
-            apt-get update; \
-            apt-get install -y --no-install-recommends git curl python3 python3-pip python3-dev libffi-dev libssl-dev gcc g++ make ca-certificates; \
-            # wkhtmltopdf is often provided by distro or must be provided separately; skip if not available to avoid failing image builds
-            if apt-cache show wkhtmltopdf >/dev/null 2>&1; then apt-get install -y --no-install-recommends wkhtmltopdf || true; fi; \
-            rm -rf /var/lib/apt/lists/*; \
-          elif command -v apk >/dev/null 2>&1; then \
-            apk add --no-cache git curl python3 py3-pip build-base libffi-dev openssl-dev; \
-            # wkhtmltopdf packages for alpine are uncommon; skip unless you add a community package; \
-          elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then \
-            if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi; \
-            $PM -y install git curl python3 python3-pip python3-devel libffi-devel openssl-devel gcc gcc-c++ make; \
-            # try wkhtmltopdf but allow failure to avoid hard-failing the build
-            $PM -y install wkhtmltopdf || true; \
-          else \
-            echo "No supported package manager found (apt-get, apk, dnf, yum). Cannot install dependencies." >&2; \
-            false; \
-          fi; \
-          # Ensure pip and bench are available
-          if command -v pip3 >/dev/null 2>&1; then PIP=pip3; elif command -v pip >/dev/null 2>&1; then PIP=pip; else echo "pip not found after installing python3"; false; fi; \
-          $PIP install -U pip setuptools wheel frappe-bench || true; \
-          # decode apps.json if provided
-          if [ -n "${APPS_JSON_BASE64:-}" ]; then mkdir -p /opt/frappe && echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; fi
-      SNIP
-      
-          # Insert the block right before the bench init RUN line (which starts with 'RUN export APP_INSTALL_ARGS')
-          # Use awk to print until the marker, then the snippet, then the rest.
+ARG APPS_JSON_BASE64
+
+# Install dependencies based on distro
+RUN set -eux; \
+    if command -v apt-get >/dev/null 2>&1; then \
+      export DEBIAN_FRONTEND=noninteractive; \
+      apt-get update; \
+      apt-get install -y --no-install-recommends git curl python3 python3-pip python3-dev libffi-dev libssl-dev gcc g++ make ca-certificates; \
+      if apt-cache show wkhtmltopdf >/dev/null 2>&1; then apt-get install -y wkhtmltopdf || true; fi; \
+      rm -rf /var/lib/apt/lists/*; \
+    elif command -v apk >/dev/null 2>&1; then \
+      apk add --no-cache git curl python3 py3-pip build-base libffi-dev openssl-dev; \
+    elif command -v dnf >/dev/null 2>&1 || command -v yum >/dev/null 2>&1; then \
+      if command -v dnf >/dev/null 2>&1; then PM=dnf; else PM=yum; fi; \
+      $PM -y install git curl python3 python3-pip python3-devel libffi-devel openssl-devel gcc gcc-c++ make; \
+      $PM -y install wkhtmltopdf || true; \
+    else \
+      echo "No supported package manager found (apt-get/apk/dnf/yum)." >&2; false; \
+    fi; \
+    if command -v pip3 >/dev/null 2>&1; then PIP=pip3; else PIP=pip; fi; \
+    $PIP install -U pip setuptools wheel frappe-bench || true; \
+    if [ -n "${APPS_JSON_BASE64:-}" ]; then mkdir -p /opt/frappe && echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; fi
+SNIP
+
           awk -v snippet="$INSTALL_SNIPPET" '
-            BEGIN{ inserted=0 }
+            BEGIN{inserted=0}
             {
               if(!inserted && $0 ~ /^RUN export APP_INSTALL_ARGS/){
                 print snippet
@@ -167,25 +149,21 @@ jobs:
               print $0
             }
             END{
-              if(!inserted){
-                print "ERROR: marker RUN export APP_INSTALL_ARGS not found in Containerfile" > "/dev/stderr"
-                exit 2
-              }
+              if(!inserted){print "ERROR: Marker not found" > "/dev/stderr"; exit 2}
             }
           ' "$CONTAINERFILE" > "${CONTAINERFILE}.new"
+
           mv "${CONTAINERFILE}.new" "$CONTAINERFILE"
-          echo "Patch inserted. Showing file head/tail around insertion for review:"
-          sed -n '1,160p' "$CONTAINERFILE" | sed -n '100,160p' || true
+          echo "Patch applied successfully. Showing context around insertion:"
+          sed -n '1,220p' "$CONTAINERFILE" | sed -n '100,220p' || true
 
-
-      - name: Set up Docker Buildx (default driver - uses runner Buildx/BuildKit)
-        id: buildx
+      - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
 
       - name: Verify Buildx
         run: docker buildx ls
 
-      - name: Build and push Docker image to ECR
+      - name: Build and push Docker image
         uses: docker/build-push-action@v6
         env:
           DOCKER_BUILDKIT: 1
@@ -195,22 +173,11 @@ jobs:
           file: ./frappe_docker/images/custom/Containerfile
           push: true
           provenance: false
-          sbom: false
           build-args: |
-            FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_PATH || 'https://github.com/frappe/frappe' }}
-            FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_BRANCH || 'version-15' }}
-            PYTHON_VERSION=${{ inputs.py-version || env.PYTHON_VERSION || '3.11' }}
-            NODE_VERSION=${{ inputs.nodejs-version || env.NODE_VERSION || '18' }}
-            APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 || '' }}
+            FRAPPE_PATH=${{ inputs.frappe-repo || env.FRAPPE_REPO }}
+            FRAPPE_BRANCH=${{ inputs.frappe-version || env.FRAPPE_VERSION }}
+            PYTHON_VERSION=${{ inputs.py-version || env.PY_VERSION }}
+            NODE_VERSION=${{ inputs.nodejs-version || env.NODE_VERSION }}
+            APPS_JSON_BASE64=${{ inputs.apps-json-base64 || env.APPS_JSON_BASE64 }}
           tags: |
             ${{ env.ECR_REGISTRY }}/${{ env.IMAGE_NAME }}:${{ env.IMAGE_VERSION }}
-
-      - name: Debug info (only on failure)
-        if: failure()
-        run: |
-          echo "=== buildx ls ==="
-          docker buildx ls || true
-          echo "=== docker system df ==="
-          docker system df || true
-          echo "=== tail buildkit logs (if any) ==="
-          docker buildx du --builder ${{ steps.buildx.outputs.name }} || true
