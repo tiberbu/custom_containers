@@ -122,6 +122,9 @@ RUN export APP_INSTALL_ARGS="" && \
 
 COPY --chown=frappe:frappe repos /home/frappe/frappe-bench/apps
 
+RUN cd /home/frappe/frappe-bench/apps/healthpro_erp/frontend \
+    && npm install
+
 RUN cd /home/frappe/frappe-bench && \
   bench setup requirements && bench build --production && \
   find apps -mindepth 1 -path "*/.git" | xargs rm -fr
