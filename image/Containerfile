@@ -123,7 +123,7 @@ RUN export APP_INSTALL_ARGS="" && \
 COPY --chown=frappe:frappe repos /home/frappe/frappe-bench/apps
 
 RUN cd /home/frappe/frappe-bench/apps/healthpro_erp/frontend \
-    && npm install
+    && yarn install --frozen-lockfile || yarn install
 
 RUN cd /home/frappe/frappe-bench && \
   bench setup requirements && bench build --production && \
