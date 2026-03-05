@@ -41,8 +41,8 @@ env:
   TOKEN: ${{ secrets.TOKEN }}
   IMAGE_NAME: ${{ inputs.image }}
   IMAGE_VERSION: ${{ inputs.version }}
-  AWS_REGION: me-central-1
-  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.me-central-1.amazonaws.com
+  AWS_REGION: eu-west-2
+  ECR_REGISTRY: ${{ secrets.AWS_ACCOUNT_ID }}.dkr.ecr.eu-west-2.amazonaws.com
 
 jobs:
   build:
