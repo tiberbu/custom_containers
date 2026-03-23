@@ -14,27 +14,10 @@ ENV PATH ${NVM_DIR}/versions/node/v${NODE_VERSION}/bin/:${PATH}
 RUN useradd -ms /bin/bash frappe \
     && apt-get update \
     && apt-get install --no-install-recommends -y \
-    curl \
-    git \
-    vim \
-    nginx \
-    gettext-base \
-    # weasyprint dependencies
-    libpango-1.0-0 \
-    libharfbuzz0b \
-    libpangoft2-1.0-0 \
-    libpangocairo-1.0-0 \
-    # For backups
-    restic \
-    # MariaDB
-    mariadb-client \
-    # Postgres
-    libpq-dev \
-    postgresql-client \
-    # For healthcheck
-    wait-for-it \
-    jq \
-    # NodeJS
+    curl git vim nginx gettext-base \
+    libpango-1.0-0 libharfbuzz0b libpangoft2-1.0-0 libpangocairo-1.0-0 \
+    restic mariadb-client libpq-dev postgresql-client \
+    wait-for-it jq \
     && mkdir -p ${NVM_DIR} \
     && curl -o- https://raw.githubusercontent.com/nvm-sh/nvm/v0.39.2/install.sh | bash \
     && . ${NVM_DIR}/nvm.sh \
@@ -44,88 +27,73 @@ RUN useradd -ms /bin/bash frappe \
     && nvm alias default v${NODE_VERSION} \
     && rm -rf ${NVM_DIR}/.cache \
     && echo 'export NVM_DIR="/home/frappe/.nvm"' >>/home/frappe/.bashrc \
-    && echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"  # This loads nvm' >>/home/frappe/.bashrc \
-    && echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"  # This loads nvm bash_completion' >>/home/frappe/.bashrc \
-    # Install wkhtmltopdf with patched qt
+    && echo '[ -s "$NVM_DIR/nvm.sh" ] && \. "$NVM_DIR/nvm.sh"' >>/home/frappe/.bashrc \
+    && echo '[ -s "$NVM_DIR/bash_completion" ] && \. "$NVM_DIR/bash_completion"' >>/home/frappe/.bashrc \
     && if [ "$(uname -m)" = "aarch64" ]; then export ARCH=arm64; fi \
     && if [ "$(uname -m)" = "x86_64" ]; then export ARCH=amd64; fi \
     && downloaded_file=wkhtmltox_${WKHTMLTOPDF_VERSION}.${WKHTMLTOPDF_DISTRO}_${ARCH}.deb \
     && curl -sLO https://github.com/wkhtmltopdf/packaging/releases/download/$WKHTMLTOPDF_VERSION/$downloaded_file \
     && apt-get install -y ./$downloaded_file \
     && rm $downloaded_file \
-    # Clean up
     && rm -rf /var/lib/apt/lists/* \
     && rm -fr /etc/nginx/sites-enabled/default \
     && pip3 install frappe-bench \
-    # Fixes for non-root nginx and logs to stdout
     && sed -i '/user www-data/d' /etc/nginx/nginx.conf \
-    && ln -sf /dev/stdout /var/log/nginx/access.log && ln -sf /dev/stderr /var/log/nginx/error.log \
+    && ln -sf /dev/stdout /var/log/nginx/access.log \
+    && ln -sf /dev/stderr /var/log/nginx/error.log \
     && touch /run/nginx.pid \
-    && chown -R frappe:frappe /etc/nginx/conf.d \
-    && chown -R frappe:frappe /etc/nginx/nginx.conf \
-    && chown -R frappe:frappe /var/log/nginx \
-    && chown -R frappe:frappe /var/lib/nginx \
-    && chown -R frappe:frappe /run/nginx.pid \
+    && chown -R frappe:frappe /etc/nginx /var/log/nginx /var/lib/nginx /run/nginx.pid \
     && chmod 755 /usr/local/bin/nginx-entrypoint.sh \
     && chmod 644 /templates/nginx/frappe.conf.template
 
+# ================= BUILDER =================
 FROM base AS builder
 
 RUN apt-get update \
     && DEBIAN_FRONTEND=noninteractive apt-get install --no-install-recommends -y \
-    # For frappe framework
-    wget \
-    # For psycopg2
-    libpq-dev \
-    # Other
-    libffi-dev \
-    liblcms2-dev \
-    libldap2-dev \
-    libmariadb-dev \
-    libsasl2-dev \
-    libtiff5-dev \
-    libwebp-dev \
-    redis-tools \
-    rlwrap \
-    tk8.6-dev \
-    cron \
-    # For pandas
-    gcc \
-    build-essential \
-    libbz2-dev \
+    wget libpq-dev libffi-dev liblcms2-dev libldap2-dev libmariadb-dev \
+    libsasl2-dev libtiff5-dev libwebp-dev redis-tools rlwrap tk8.6-dev cron \
+    gcc build-essential libbz2-dev \
     && rm -rf /var/lib/apt/lists/*
 
-# apps.json includes
+# Inject apps.json
 ARG APPS_JSON_BASE64
 RUN if [ -n "${APPS_JSON_BASE64}" ]; then \
-    mkdir /opt/frappe && echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; \
+    mkdir -p /opt/frappe && \
+    echo "${APPS_JSON_BASE64}" | base64 -d > /opt/frappe/apps.json; \
   fi
 
 USER frappe
 
-ARG FRAPPE_BRANCH=version-14
-ARG FRAPPE_PATH=https://github.com/frappe/frappe
-RUN export APP_INSTALL_ARGS="" && \
-  if [ -n "${APPS_JSON_BASE64}" ]; then \
-    export APP_INSTALL_ARGS="--apps_path=/opt/frappe/apps.json"; \
-  fi && \
-  bench init ${APP_INSTALL_ARGS}\
-    --frappe-branch=${FRAPPE_BRANCH} \
-    --frappe-path=${FRAPPE_PATH} \
+# Step 1: Init bench with TEMP frappe (bootstrap only)
+RUN bench init \
+    --frappe-branch=version-15 \
+    --frappe-path=https://github.com/frappe/frappe \
     --no-procfile \
     --no-backups \
     --skip-redis-config-generation \
     --verbose \
-    /home/frappe/frappe-bench && \
-  cd /home/frappe/frappe-bench && \
-  echo "{}" > sites/common_site_config.json
+    /home/frappe/frappe-bench
 
+# Step 2: Replace frappe with apps.json-controlled installs
+RUN if [ -f /opt/frappe/apps.json ]; then \
+    cd /home/frappe/frappe-bench && \
+    rm -rf apps/frappe && \
+    bench get-app --apps_path /opt/frappe/apps.json; \
+  fi
+
+# Optional: copy local custom apps (safe override)
 COPY --chown=frappe:frappe repos /home/frappe/frappe-bench/apps
 
+# Step 3: Build assets
 RUN cd /home/frappe/frappe-bench && \
-  bench setup requirements && bench build --production && \
-  find apps -mindepth 1 -path "*/.git" | xargs rm -fr
+    bench setup requirements && \
+    bench build --production && \
+    find apps -mindepth 1 -path "*/.git" | xargs rm -fr
 
+RUN echo "{}" > /home/frappe/frappe-bench/sites/common_site_config.json
+
+# ================= BACKEND =================
 FROM base as backend
 
 USER frappe
